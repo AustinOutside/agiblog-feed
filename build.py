@@ -54,6 +54,10 @@ FEEDS = [
     ("Latent Space",    "https://www.latent.space/feed"),
     ("Import AI",       "https://importai.substack.com/feed"),
 ]
+# substack.com answers 403 to some datacenter clients. Same newsletter.
+FALLBACK_URLS = {
+    "Import AI": "https://jack-clark.net/feed/",
+}
 MAX_ITEMS = 20
 # These two post often enough to crowd a date-sorted page.
 SOURCE_CAPS = {
@@ -69,10 +73,16 @@ TRACKING_PARAMS = frozenset({
     "oly_anon_id", "oly_enc_id", "vero_id", "vero_conv",
     "ncid", "ref", "ref_src",
 })
-_missing_caps = sorted(set(SOURCE_CAPS) - {name for name, _url in FEEDS})
+_feed_names = {name for name, _url in FEEDS}
+_missing_caps = sorted(set(SOURCE_CAPS) - _feed_names)
 if _missing_caps:
     raise SystemExit("SOURCE_CAPS names missing from FEEDS: " + ", ".join(_missing_caps))
+_missing_fallbacks = sorted(set(FALLBACK_URLS) - _feed_names)
+if _missing_fallbacks:
+    raise SystemExit("FALLBACK_URLS names missing from FEEDS: " + ", ".join(_missing_fallbacks))
 UA = "Mozilla/5.0 (compatible; agi.blog feed builder; +https://www.agi.blog)"
+# Second try when a host rejects the builder UA (Cloudflare error 1010).
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 OUT = os.environ.get("OUT_DIR", "public")
 
 
@@ -204,17 +214,36 @@ def dedupe(results):
     return dropped
 
 
+def read_url(url, ua):
+    req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
 def fetch(name_url):
     name, url = name_url
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            items = parse(r.read(), SOURCE_CAPS.get(name, MAX_ITEMS))
-        if not items:
-            return name, {"status": "error", "message": "no items", "items": []}
-        return name, {"status": "ok", "items": items}
-    except Exception as e:  # isolate every source
-        return name, {"status": "error", "message": f"{type(e).__name__}: {e}"[:200], "items": []}
+    candidates = [url]
+    alt = FALLBACK_URLS.get(name)
+    if alt and alt != url:
+        candidates.append(alt)
+    error = None
+    for candidate in candidates:
+        for attempt, ua in enumerate((UA, BROWSER_UA)):
+            try:
+                items = parse(read_url(candidate, ua), SOURCE_CAPS.get(name, MAX_ITEMS))
+            except Exception as e:  # isolate every source
+                error = e
+                # A 403 is often the UA. Try a browser UA before the next URL.
+                if getattr(e, "code", None) == 403 and attempt == 0:
+                    continue
+                break
+            if items:
+                return name, {"status": "ok", "items": items}
+            error = RuntimeError("no items")
+            break
+    if isinstance(error, RuntimeError) and str(error) == "no items":
+        return name, {"status": "error", "message": "no items", "items": []}
+    return name, {"status": "error", "message": f"{type(error).__name__}: {error}"[:200], "items": []}
 
 
 def main():
