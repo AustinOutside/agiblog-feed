@@ -16,5 +16,6 @@ The agi.blog code block fetches that single file instead of calling api.rss2json
 - A source that fails keeps its last good items (marked `"stale": true`) so one outage never blanks the page.
 - If every source fails, the run fails and the previous good file stays live.
 - GitHub disables scheduled workflows after 60 days with no repo activity; the workflow makes a one-line keepalive commit about once a week (when keepalive.txt is older than 7 days).
+- GitHub was dropping the `*/30` schedule (runs landed every 4–6 hours, and each one started immediately). After each publish, `.github/workflows/build.yml` waits until the file is about 30 minutes old and dispatches the next run with the built-in token. No extra secret. Crons at minutes 7, 19, 37, and 49 only restart that chain if a run dies. Run workflow, and pushes to `main`, still build immediately.
 - GitHub Pages sends `Access-Control-Allow-Origin: *`, so the browser can read the file from agi.blog.
-- Cost: $0 (public repo). Uses about 1 minute per run, about 1,500 minutes a month, all free on public repos.
+- Cost: $0 (public repo). Publishing takes about a minute; the half-hour wait holds one runner between publishes. Actions minutes on public repos are not billed.

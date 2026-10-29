@@ -2,7 +2,12 @@ name: Build agi.blog feeds
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay scheduled runs a few minutes)
+    # Watchdog only. GitHub was dropping this repo's "*/30 * * * *" runs and
+    # creating one every 4–6 hours; those runs start immediately, so the gap
+    # is skipped schedules rather than queue delay. Off :00/:30 in case the
+    # slot is ever the problem. The rearm job is the 30-minute clock.
+    - cron: "7,37 * * * *"
+    - cron: "19,49 * * * *"
   workflow_dispatch: {}
   push:
     branches: [main]
@@ -11,15 +16,16 @@ permissions:
   contents: write   # weekly keepalive commit (scheduled workflows stop after 60 days without repo activity)
   pages: write
   id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+  actions: write    # rearm dispatches the next run with the built-in token
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Job-level so the rearm sleep does not block a manual run or the next publish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -32,7 +38,9 @@ jobs:
         env:
           OUT_DIR: public
           PREVIOUS_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/feeds.json
-        run: python build.py
+        run: |
+          python build.py
+          python -c 'import json; print("generated", json.load(open("public/feeds.json"))["generated"])'
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -50,3 +58,26 @@ jobs:
             git add keepalive.txt
             git commit -m "keepalive" && git push
           fi
+
+  rearm:
+    name: Schedule next build
+    needs: build
+    # A failed fetch should still arm the next attempt. A cancelled run should not.
+    if: "${{ always() && !cancelled() && needs.build.result != 'cancelled' && needs.build.result != 'skipped' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # A newer publish cancels this wait and arms the next run itself.
+    concurrency:
+      group: feed-rearm
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Wait, then dispatch the next build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/feeds.json
+          RUN_ID: ${{ github.run_id }}
+          INTERVAL: "1800"
+        run: bash rearm.sh
