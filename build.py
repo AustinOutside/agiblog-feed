@@ -7,10 +7,15 @@ rss2json-compatible shape keyed by source name:
 
   {"generated": "...", "feeds": {"TechCrunch AI": {"status": "ok", "items": [...]}, ...}}
 
+Each source keeps at most MAX_ITEMS items (SOURCE_CAPS overrides that).
+Before writing, a later item is dropped when its normalized link or title
+matches an item already seen from an earlier source. First-listed sources win.
+
 Standard library only. One failing source never breaks the others.
 """
 import concurrent.futures, datetime, email.utils, html, json, os, re, sys, urllib.request
 import xml.etree.ElementTree as ET
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # name must match the `name:` in the agi.blog code block FEEDS list.
 FEEDS = [
@@ -22,7 +27,7 @@ FEEDS = [
     ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
     ("MIT News AI",     "https://news.mit.edu/rss/topic/artificial-intelligence2"),
     ("ArXiv AI",        "https://rss.arxiv.org/rss/cs.AI"),
-    ("ArXiv ML",        "https://rss.arxiv.org/rss/cs.LG"),
+    ("ArXiv ML",        "https://export.arxiv.org/api/query?search_query=cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=20"),
     ("OpenAI",          "https://openai.com/news/rss.xml"),
     ("Anthropic",       "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml"),
     ("Google DeepMind", "https://deepmind.google/blog/rss.xml"),
@@ -37,8 +42,36 @@ FEEDS = [
     ("Microsoft AI",    "https://news.microsoft.com/source/topics/ai/feed/"),
     ("NVIDIA AI",       "https://developer.nvidia.com/blog/feed"),
     ("Apple ML",        "https://machinelearning.apple.com/rss.xml"),
+    # Technical / research additions (2026-10-29)
+    ("Anthropic Research", "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml"),
+    ("Google Research", "https://research.google/blog/rss/"),
+    ("Microsoft Research", "https://www.microsoft.com/en-us/research/feed/"),
+    ("Ai2",             "https://allenai.org/rss.xml"),
+    ("Mistral AI",      "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_mistral.xml"),
+    ("Epoch AI",        "https://epoch.ai/atom.xml"),
+    ("Simon Willison",  "https://simonwillison.net/tags/llms.atom"),
+    ("Interconnects",   "https://www.interconnects.ai/feed"),
+    ("Latent Space",    "https://www.latent.space/feed"),
+    ("Import AI",       "https://importai.substack.com/feed"),
 ]
 MAX_ITEMS = 20
+# These two post often enough to crowd a date-sorted page.
+SOURCE_CAPS = {
+    "Latent Space": 8,
+    "Simon Willison": 8,
+}
+# Query keys that do not identify the article. utm_* and hsa_* match by prefix.
+TRACKING_PARAMS = frozenset({
+    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid",
+    "msclkid", "twclid", "li_fat_id", "ttclid", "yclid", "srsltid",
+    "mc_cid", "mc_eid", "mkt_tok", "igshid", "igsh",
+    "_ga", "_gl", "_hsenc", "_hsmi",
+    "oly_anon_id", "oly_enc_id", "vero_id", "vero_conv",
+    "ncid", "ref", "ref_src",
+})
+_missing_caps = sorted(set(SOURCE_CAPS) - {name for name, _url in FEEDS})
+if _missing_caps:
+    raise SystemExit("SOURCE_CAPS names missing from FEEDS: " + ", ".join(_missing_caps))
 UA = "Mozilla/5.0 (compatible; agi.blog feed builder; +https://www.agi.blog)"
 OUT = os.environ.get("OUT_DIR", "public")
 
@@ -86,7 +119,7 @@ def safe_link(u):
     return u if re.match(r"^https?://", u, re.I) else ""
 
 
-def parse(xml_bytes):
+def parse(xml_bytes, limit=MAX_ITEMS):
     xml_bytes = re.sub(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", b"", xml_bytes)
     root = ET.fromstring(xml_bytes)
     items = []
@@ -112,7 +145,63 @@ def parse(xml_bytes):
         if title and link:
             items.append({"title": title, "link": link, "description": plain(desc, 400), "pubDate": iso(date)})
     items.sort(key=lambda i: i["pubDate"], reverse=True)
-    return items[:MAX_ITEMS]
+    return items[:limit]
+
+
+def normalize_link(url):
+    """Lowercase the host, drop the fragment, the trailing slash, and tracking params."""
+    raw = (url or "").strip()
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    host = (parts.hostname or "").lower()
+    if not host:
+        return raw
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    kept = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        lk = key.lower()
+        if lk.startswith("utm_") or lk.startswith("hsa_") or lk in TRACKING_PARAMS:
+            continue
+        kept.append((key, value))
+    kept.sort()
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path.rstrip("/"), urlencode(kept), ""))
+
+
+def normalize_title(title):
+    """Lowercase, then collapse punctuation and whitespace."""
+    s = (title or "").lower()
+    s = re.sub(r"[^\w\s]+", " ", s)
+    s = s.replace("_", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def dedupe(results):
+    """Drop later items whose link or title matches an earlier one. Returns the drop count.
+
+    Sources are walked in FEEDS order, so the first-listed source keeps the item.
+    """
+    seen_links = set()
+    seen_titles = set()
+    dropped = 0
+    for name, _url in FEEDS:
+        entry = results.get(name) or {}
+        kept = []
+        for item in entry.get("items") or []:
+            link_key = normalize_link(item.get("link", ""))
+            title_key = normalize_title(item.get("title", ""))
+            if (link_key and link_key in seen_links) or (title_key and title_key in seen_titles):
+                dropped += 1
+            else:
+                kept.append(item)
+            if link_key:
+                seen_links.add(link_key)
+            if title_key:
+                seen_titles.add(title_key)
+        if "items" in entry:
+            entry["items"] = kept
+    return dropped
 
 
 def fetch(name_url):
@@ -120,7 +209,7 @@ def fetch(name_url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"})
         with urllib.request.urlopen(req, timeout=30) as r:
-            items = parse(r.read())
+            items = parse(r.read(), SOURCE_CAPS.get(name, MAX_ITEMS))
         if not items:
             return name, {"status": "error", "message": "no items", "items": []}
         return name, {"status": "ok", "items": items}
@@ -154,6 +243,7 @@ def main():
             pv = prev.get("feeds", {}).get(name)
             if v["status"] != "ok" and pv and pv.get("status") == "ok":
                 results[name] = dict(pv, stale=True)
+    dropped = dedupe(results)
     os.makedirs(OUT, exist_ok=True)
     with open(prev_path, "w") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
@@ -161,7 +251,7 @@ def main():
         f.write("<!doctype html><title>agi.blog feed data</title><p>Data for <a href=\"https://www.agi.blog\">agi.blog</a>: <a href=\"feeds.json\">feeds.json</a></p>")
     for name, v in results.items():
         print(f"{v['status']:6} {len(v['items']):3}  {name}  {v.get('message','')}")
-    print(f"{ok}/{len(FEEDS)} sources ok")
+    print(f"{ok}/{len(FEEDS)} sources ok, deduped {dropped} items")
     if ok == 0:
         sys.exit(1)  # do not deploy an empty file
 
