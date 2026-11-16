@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 FEEDS = [
     ("TechCrunch AI",   "https://techcrunch.com/category/artificial-intelligence/feed/"),
     ("The Verge AI",    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
-    ("VentureBeat AI",  "https://feeds.feedburner.com/venturebeat/SZYF"),
+    ("VentureBeat AI",  "https://venturebeat.com/feed/"),  # site-wide feed; category AI feed is dormant
     ("Wired AI",        "https://www.wired.com/feed/tag/ai/latest/rss"),
     ("Ars Technica AI", "https://arstechnica.com/ai/feed"),
     ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
@@ -29,7 +29,7 @@ FEEDS = [
     ("ArXiv AI",        "https://rss.arxiv.org/rss/cs.AI"),
     ("ArXiv ML",        "https://export.arxiv.org/api/query?search_query=cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=20"),
     ("OpenAI",          "https://openai.com/news/rss.xml"),
-    ("Anthropic",       "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml"),
+    ("Anthropic",       "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml"),
     ("Google DeepMind", "https://deepmind.google/blog/rss.xml"),
     ("Google AI Blog",  "https://blog.google/technology/ai/rss"),
     ("Stability AI",    "https://stability.ai/news-updates?format=rss"),
@@ -53,6 +53,10 @@ FEEDS = [
     ("Interconnects",   "https://www.interconnects.ai/feed"),
     ("Latent Space",    "https://www.latent.space/feed"),
     ("Import AI",       "https://importai.substack.com/feed"),
+    # Technical / research additions (2026-11-16)
+    ("Ahead of AI",     "https://magazine.sebastianraschka.com/feed"),  # Sebastian Raschka
+    ("BAIR",            "https://bair.berkeley.edu/blog/feed.xml"),     # Berkeley AI Research
+    ("vLLM Blog",       "https://vllm.ai/blog/rss.xml"),
 ]
 # substack.com answers 403 to some datacenter clients. Same newsletter.
 FALLBACK_URLS = {
@@ -129,8 +133,55 @@ def safe_link(u):
     return u if re.match(r"^https?://", u, re.I) else ""
 
 
+# Common RSS/Atom prefixes, used when a feed omits the xmlns declaration.
+# Unknown prefixes get a stable urn so ElementTree can still parse the document.
+KNOWN_XMLNS = {
+    "media": "http://search.yahoo.com/mrss/",
+    "content": "http://purl.org/rss/1.0/modules/content/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "atom": "http://www.w3.org/2005/Atom",
+    "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
+    "sy": "http://purl.org/rss/1.0/modules/syndication/",
+    "slash": "http://purl.org/rss/1.0/modules/slash/",
+    "georss": "http://www.georss.org/georss",
+    "thr": "http://purl.org/syndication/thread/1.0",
+    "wfw": "http://wellformedweb.org/CommentAPI/",
+    "gd": "http://schemas.google.com/g/2005",
+    "yt": "http://www.youtube.com/xml/schemas/2015",
+}
+
+
+def declare_undeclared_prefixes(xml_bytes):
+    """Inject xmlns:* on the root element for prefixes used but never declared.
+
+    Some feeds (notably Hacker Noon) emit media:content / media:thumbnail
+    without xmlns:media, which makes ElementTree raise ParseError: unbound prefix.
+    """
+    used = set(re.findall(rb"</?([A-Za-z_][\w.-]*):", xml_bytes))
+    used.update(re.findall(rb"(?<=[\s<])([A-Za-z_][\w.-]*):[\w.-]+\s*=", xml_bytes))
+    declared = set(re.findall(rb"xmlns:([A-Za-z_][\w.-]*)\s*=", xml_bytes))
+    reserved = {b"xml", b"xmlns"}
+    missing = [p for p in sorted(used) if p not in declared and p.lower() not in reserved]
+    if not missing:
+        return xml_bytes
+    decls = []
+    for p in missing:
+        key = p.decode("ascii", "replace")
+        uri = KNOWN_XMLNS.get(key) or KNOWN_XMLNS.get(key.lower()) or ("urn:undeclared-prefix:" + key)
+        decls.append((' xmlns:%s="%s"' % (key, uri)).encode("ascii"))
+    extra = b"".join(decls)
+
+    def inject(m):
+        return m.group(0) + extra
+
+    # First real element, not <?xml ...?> or <!DOCTYPE ...>
+    new, n = re.subn(rb"<(?![!?])([A-Za-z_][\w:.-]*)\b", inject, xml_bytes, count=1)
+    return new if n else xml_bytes
+
+
 def parse(xml_bytes, limit=MAX_ITEMS):
     xml_bytes = re.sub(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", b"", xml_bytes)
+    xml_bytes = declare_undeclared_prefixes(xml_bytes)
     root = ET.fromstring(xml_bytes)
     items = []
     for el in root.iter():
