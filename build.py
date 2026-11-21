@@ -21,7 +21,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 FEEDS = [
     ("TechCrunch AI",   "https://techcrunch.com/category/artificial-intelligence/feed/"),
     ("The Verge AI",    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
-    ("VentureBeat AI",  "https://rss.app/feeds/eeTxSA2c85NbILFc.xml"),  # venturebeat.com feeds 429; rss.app mirror of the site feed
     ("Wired AI",        "https://www.wired.com/feed/tag/ai/latest/rss"),
     ("Ars Technica AI", "https://arstechnica.com/ai/feed"),
     ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
