@@ -13,7 +13,7 @@ matches an item already seen from an earlier source. First-listed sources win.
 
 Standard library only. One failing source never breaks the others.
 """
-import concurrent.futures, datetime, email.utils, html, json, os, re, sys, urllib.request
+import concurrent.futures, datetime, email.utils, html, json, os, re, sys, time, urllib.request
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -31,7 +31,6 @@ FEEDS = [
     ("Anthropic",       "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_news.xml"),
     ("Google DeepMind", "https://deepmind.google/blog/rss.xml"),
     ("Google AI Blog",  "https://blog.google/technology/ai/rss"),
-    ("Stability AI",    "https://stability.ai/news-updates?format=rss"),
     ("Hacker News",     "https://hnrss.org/newest?q=AI+OR+LLM+OR+%22artificial+intelligence%22&count=20"),
     ("Hacker Noon AI",  "https://hackernoon.com/tagged/ai/feed"),
     ("Product Hunt AI", "https://www.producthunt.com/feed?category=artificial-intelligence"),
@@ -278,15 +277,17 @@ def fetch(name_url):
         candidates.append(alt)
     error = None
     for candidate in candidates:
-        for attempt, ua in enumerate((UA, BROWSER_UA)):
+        # One try with the builder UA, then two retries with a browser UA.
+        # Backoff is 1s then 2s. A parsed feed with no items is not retried.
+        for attempt in range(3):
+            if attempt:
+                time.sleep(attempt)
+            ua = BROWSER_UA if attempt else UA
             try:
                 items = parse(read_url(candidate, ua), SOURCE_CAPS.get(name, MAX_ITEMS))
             except Exception as e:  # isolate every source
                 error = e
-                # A 403 is often the UA. Try a browser UA before the next URL.
-                if getattr(e, "code", None) == 403 and attempt == 0:
-                    continue
-                break
+                continue
             if items:
                 return name, {"status": "ok", "items": items}
             error = RuntimeError("no items")

@@ -18,14 +18,19 @@ permissions:
   id-token: write
   actions: write    # rearm dispatches the next run with the built-in token
 
+# One Pages deploy at a time. An overlapping run waits instead of failing
+# deploy-pages on the shared github-pages artifact. cancel-in-progress is
+# false so a deploy already running is not aborted. The default queue keeps
+# a single pending run and cancels the rest, so crons plus the rearm
+# dispatch cannot stack a line of 30-minute sleeps.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Job-level so the rearm sleep does not block a manual run or the next publish.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

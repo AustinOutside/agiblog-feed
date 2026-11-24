@@ -35,8 +35,11 @@ if [ "$STALE_DELAY" -lt 1 ]; then STALE_DELAY=1; fi
 if [ "$STALE_DELAY" -gt 60 ]; then STALE_DELAY=60; fi
 if [ "$CHUNK" -lt 1 ]; then CHUNK=1; fi
 
-# Prints how many newer runs are still in flight. Returns non-zero if the
+# Prints how many newer runs are actually executing. Returns non-zero if the
 # listing itself failed. "completed" includes cancelled runs; those are done.
+# Queued, pending, and waiting runs are only held by the workflow concurrency
+# group (one pending run). They must not cut this 30-minute sleep short, or
+# every watchdog cron would restart the clock and the queue would churn.
 active_newer() {
   local json
   json=$(gh run list --workflow "$WORKFLOW" --repo "$REPO" --limit 50 --json databaseId,status) || return 1
@@ -44,7 +47,7 @@ active_newer() {
 import json, os, sys
 me = int(os.environ["RUN_ID"])
 rows = json.load(sys.stdin)
-print(sum(1 for r in rows if int(r["databaseId"]) > me and r.get("status") != "completed"))
+print(sum(1 for r in rows if int(r["databaseId"]) > me and r.get("status") == "in_progress"))
 ' <<<"$json"
 }
 

@@ -140,6 +140,10 @@ feed_future=$(printf '{"generated":"%s","feeds":{}}' "$future")
 run_rearm "$newer" "$fresh" "$feed_fresh" 0 0
 assert "newer run exits without sleeping or dispatching" "[ \"$CODE\" -eq 0 ] && [ \"$SLEEPS\" -eq 0 ] && [ \"$DISPATCHES\" -eq 0 ]"
 
+queued='[{"databaseId":100,"status":"in_progress"},{"databaseId":150,"status":"queued"}]'
+run_rearm "$queued" "$fresh" "$feed_fresh" 0 0
+assert "a queued newer run does not cut the interval short" "[ \"$CODE\" -eq 0 ] && [ \"$SLEEPS\" -ge 1700 ] && [ \"$SLEEPS\" -le 1760 ] && [ \"$DISPATCHES\" -eq 1 ]"
+
 run_rearm "$self" "$fresh" "$feed_fresh" 0 0
 assert "fresh run waits out the rest of the interval" "[ \"$CODE\" -eq 0 ] && [ \"$SLEEPS\" -ge 1700 ] && [ \"$SLEEPS\" -le 1760 ] && [ \"$DISPATCHES\" -eq 1 ]"
 
