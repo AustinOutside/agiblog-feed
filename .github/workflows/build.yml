@@ -2,10 +2,12 @@ name: Build agi.blog feeds
 
 on:
   schedule:
-    # Watchdog only. GitHub was dropping this repo's "*/30 * * * *" runs and
-    # creating one every 4–6 hours; those runs start immediately, so the gap
-    # is skipped schedules rather than queue delay. Off :00/:30 in case the
-    # slot is ever the problem. The rearm workflow is the 30-minute clock.
+    # Backstop. The rearm workflow is the 30-minute clock, but a missed
+    # dispatch used to leave the feed stale until someone pushed. This cron
+    # starts a build on its own. The offset crons cover the same gap when
+    # GitHub drops the */30 slot. Pages concurrency below keeps those from
+    # deploying on top of each other.
+    - cron: "*/30 * * * *"
     - cron: "7,37 * * * *"
     - cron: "19,49 * * * *"
   workflow_dispatch: {}
@@ -16,6 +18,7 @@ permissions:
   contents: write   # weekly keepalive commit (scheduled workflows stop after 60 days without repo activity)
   pages: write
   id-token: write
+  actions: write    # dispatch rearm.yml with the built-in token
 
 # One Pages deploy at a time. An overlapping run waits instead of failing
 # deploy-pages on the shared github-pages artifact. cancel-in-progress is
@@ -66,6 +69,13 @@ jobs:
       - id: deploy3
         if: steps.deploy.outcome == 'failure' && steps.deploy2.outcome == 'failure'
         uses: actions/deploy-pages@v4
+      # workflow_run does not fire when this build was started with the
+      # built-in token, so the next wait has to be dispatched from here.
+      - name: Arm the next build
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run rearm.yml --repo "$GITHUB_REPOSITORY" --ref main -f run_id="${{ github.run_id }}"
       - name: Weekly keepalive commit
         if: github.event_name == 'schedule' && (steps.deploy.outcome == 'success' || steps.deploy2.outcome == 'success' || steps.deploy3.outcome == 'success')
         run: |
